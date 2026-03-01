@@ -168,3 +168,63 @@ all_results |>
 # -----------------------------------------------------------------------------
 
 close_session(session)
+
+
+# =============================================================================
+# Exercises
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Exercise 1 (easy) — Extract the intro paragraph from a Wikipedia page
+# Navigate to the Hertie School Wikipedia page and extract the first paragraph
+# of the article body. Note: Wikipedia is static HTML — this is illustrative of
+# the basic open_url → get_page_source() → rvest workflow.
+# -----------------------------------------------------------------------------
+
+session <- selenider_session("chromote",
+  options = chromote_options(headless = FALSE, width = 1280, height = 900))
+
+open_url("https://en.wikipedia.org/wiki/Hertie_School")
+Sys.sleep(2)
+
+html <- get_page_source()
+
+paras <- html |>
+  html_elements(".mw-parser-output > p") |>
+  html_text(trim = TRUE)
+
+paras[nzchar(paras)][1]  # first non-empty paragraph
+
+close_session(session)
+
+# -----------------------------------------------------------------------------
+# Exercise 2 (intermediate) — Compare YouTube results for two queries
+# Use collect_search_results() to collect the top results for two related
+# queries (e.g. "nuclear energy" and "Atomkraft"). Which channels appear in both
+# result sets? Are there channels that appear only in one language's results?
+# (Assumes session is open and collect_search_results() is defined above.)
+# -----------------------------------------------------------------------------
+
+results <- map_dfr(
+  c("nuclear energy", "Atomkraft"),
+  \(q) { Sys.sleep(2); collect_search_results(q, n_scrolls = 2) }
+)
+
+# Channels appearing in both queries
+results |>
+  group_by(channel) |>
+  summarise(queries = n_distinct(query), .groups = "drop") |>
+  filter(queries == 2) |>
+  arrange(channel)
+
+# Rank of shared channels per query
+shared_channels <- results |>
+  group_by(channel) |>
+  filter(n_distinct(query) == 2) |>
+  pull(channel) |>
+  unique()
+
+results |>
+  filter(channel %in% shared_channels) |>
+  select(query, rank, channel) |>
+  arrange(query, rank)

@@ -33,3 +33,39 @@ resp |> resp_header("Content-Type")
 
 # All headers as a named list
 resp |> resp_headers()
+
+
+# =============================================================================
+# Exercises
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Exercise 1 (easy) — Inspect a response with httpbin
+# httpbin.org echoes back whatever request you send it.
+# Send a GET request with two query parameters of your choice and inspect the
+# result. What does $args contain? What user-agent does R report?
+# -----------------------------------------------------------------------------
+
+resp <- request("https://httpbin.org/get") |>
+  req_url_query(city = "Berlin", year = 2025) |>
+  req_perform()
+
+resp_status(resp)
+body <- resp_body_json(resp)
+body$args
+body$headers[["User-Agent"]]
+
+# -----------------------------------------------------------------------------
+# Exercise 2 (intermediate) — Send a POST request with a JSON body
+# Some APIs use POST with data in the request body instead of the URL.
+# Use req_body_json() to POST a payload to httpbin. Which field in the response
+# contains your data? What Content-Type did httr2 set automatically?
+# -----------------------------------------------------------------------------
+
+resp <- request("https://httpbin.org/post") |>
+  req_body_json(list(name = "Anna", country = "DE", year = 2025)) |>
+  req_perform()
+
+body <- resp_body_json(resp)
+body$json
+body$headers[["Content-Type"]]

@@ -92,3 +92,35 @@ ggplot(results, aes(x = reorder(name, probability), y = probability, fill = regi
     x = NULL, y = "Probability", fill = "Region"
   ) +
   theme_minimal()
+
+
+# =============================================================================
+# Exercises
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Exercise 1 (easy) — Look up your own name
+# Query genderize.io with your own first name, then a name from a very different
+# cultural background (e.g. "Kwabena", "Priyanka", "Seun"). Compare probability
+# and count. What do the differences tell you?
+# -----------------------------------------------------------------------------
+
+genderize(c("Simon", "Kwabena")) |>
+  select(name, gender, probability, count)
+
+# -----------------------------------------------------------------------------
+# Exercise 2 (intermediate) — Audit German party leaders
+# Feed the first names of current Bundestag Fraktionen leaders into genderize()
+# and visualise the results. What does the confidence pattern look like — and
+# why might this API be unreliable for reporting on non-Western politicians?
+# -----------------------------------------------------------------------------
+
+leaders <- tibble(
+  name  = c("Friedrich", "Olaf", "Robert", "Alice", "Sahra", "Anton"),
+  party = c("CDU/CSU", "SPD", "Grüne", "AfD", "BSW", "FDP")
+)
+
+genderize(leaders$name) |>
+  left_join(leaders, by = "name") |>
+  select(name, party, gender, probability, count) |>
+  arrange(probability)

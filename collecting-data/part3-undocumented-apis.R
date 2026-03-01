@@ -94,3 +94,53 @@ page2 <-
   req_perform() |>
   resp_body_json(simplifyVector = TRUE) |>
   pluck("pages")
+
+
+# =============================================================================
+# Exercises
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Exercise 1 (easy) — Search for your city
+# Use the title-search endpoint to retrieve the top 10 results for a city of
+# your choice. How many results have a non-empty description field?
+# -----------------------------------------------------------------------------
+
+city_results <-
+  request("https://en.wikipedia.org/w/rest.php/v1/search/title") |>
+  req_url_query(q = "Berlin", limit = 10) |>
+  req_headers(`User-Agent`      = "DataJournalismCourse/1.0",
+              `Accept-Encoding` = "gzip, deflate") |>
+  req_perform() |>
+  resp_body_json(simplifyVector = TRUE) |>
+  pluck("pages")
+
+city_results |> select(title, description)
+sum(!is.na(city_results$description))
+
+# -----------------------------------------------------------------------------
+# Exercise 2 (intermediate) — Compare title search vs. full-text search
+# Run the same query ("data journalism") through both endpoints. Do the results
+# overlap? Which is more useful for a research task?
+# -----------------------------------------------------------------------------
+
+make_wiki_request <- function(endpoint, query, limit = 10) {
+  request(paste0("https://en.wikipedia.org/w/rest.php/v1/search/", endpoint)) |>
+    req_url_query(q = query, limit = limit) |>
+    req_headers(`User-Agent`      = "DataJournalismCourse/1.0",
+                `Accept-Encoding` = "gzip, deflate") |>
+    req_perform() |>
+    resp_body_json(simplifyVector = TRUE) |>
+    pluck("pages") |>
+    select(title, description) |>
+    mutate(endpoint = endpoint)
+}
+
+title_results <- make_wiki_request("title", "data journalism")
+page_results  <- make_wiki_request("page",  "data journalism")
+
+# Articles in both sets
+intersect(title_results$title, page_results$title)
+
+# Articles only in full-text search
+setdiff(page_results$title, title_results$title)

@@ -1,0 +1,868 @@
+---
+title: "Working with Surveys in R"
+subtitle: "E1493 - Data Journalism"
+author: "Simon Munzert"
+institution: "Hertie School"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: false
+    theme: cosmo
+    code-fold: false
+    code-tools: true
+    df-print: paged
+    fig-width: 8
+    fig-height: 5
+    highlight-style: github
+    embed-resources: true
+    link-external-newwindow: true
+execute:
+  eval: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| eval: true
+#| include: false
+#| label: load-packages
+
+pkgs <- c("tidyverse", "survey", "srvyr")
+lapply(pkgs, library, character.only = TRUE)
+set.seed(42)
+```
+
+::: {.callout-note}
+## Before you start
+
+Install the packages used in this workshop:
+
+```r
+install.packages(c("tidyverse", "survey", "srvyr"))
+```
+
+This script accompanies the **Session 5 slides** on Sampling and Surveys. It's designed as a hands-on complement — the slides cover the theory, this script lets you *see* how sampling, weighting, and uncertainty work in practice.
+:::
+
+---
+
+# Part 1: Simulating Sampling — Good and Bad {#sampling}
+
+The best way to build intuition for sampling is to create a known population and watch what happens when you sample from it — well and badly.
+
+## Creating a population
+
+We'll simulate a German-like population of 100,000 adults. Each person has an age group, a region (East/West), an education level, and an opinion on a policy question ("support for four-day work week"). Support depends on demographics: younger and more educated people are more supportive.
+
+```{r}
+#| eval: true
+#| label: create-population
+
+N <- 100000
+
+population <- tibble(
+  id = 1:N,
+  age_group = sample(
+    c("18-29", "30-49", "50-64", "65+"),
+    N, replace = TRUE,
+    prob = c(0.15, 0.30, 0.28, 0.27)
+  ),
+  region = sample(
+    c("West", "East"),
+    N, replace = TRUE,
+    prob = c(0.80, 0.20)
+  ),
+  education = sample(
+    c("low", "medium", "high"),
+    N, replace = TRUE,
+    prob = c(0.30, 0.45, 0.25)
+  )
+) |>
+  mutate(
+    # True support probability depends on demographics
+    p_support = case_when(
+      age_group == "18-29" & education == "high" ~ 0.78,
+      age_group == "18-29" & education == "medium" ~ 0.68,
+      age_group == "18-29" & education == "low" ~ 0.55,
+      age_group == "30-49" & education == "high" ~ 0.62,
+      age_group == "30-49" & education == "medium" ~ 0.52,
+      age_group == "30-49" & education == "low" ~ 0.40,
+      age_group == "50-64" & education == "high" ~ 0.45,
+      age_group == "50-64" & education == "medium" ~ 0.35,
+      age_group == "50-64" & education == "low" ~ 0.28,
+      age_group == "65+" & education == "high" ~ 0.32,
+      age_group == "65+" & education == "medium" ~ 0.22,
+      age_group == "65+" & education == "low" ~ 0.18,
+    ),
+    support = rbinom(N, 1, p_support)
+  )
+
+# The true population parameter
+(true_support <- mean(population$support))
+```
+
+The true population support rate is our target — every sample-based estimate should try to get close to this number.
+
+## Simple random sampling
+
+Draw a simple random sample of n = 1,000 and compute the estimate with a 95% confidence interval:
+
+```{r}
+#| eval: true
+#| label: srs
+
+n <- 1000
+srs <- population |> slice_sample(n = n)
+
+p_hat <- mean(srs$support)
+se <- sqrt(p_hat * (1 - p_hat) / n)
+ci <- p_hat + c(-1.96, 1.96) * se
+
+tibble(
+  method = "SRS (n=1000)",
+  estimate = p_hat,
+  se = se,
+  ci_low = ci[1],
+  ci_high = ci[2],
+  true_value = true_support,
+  covers_truth = ci[1] <= true_support & true_support <= ci[2]
+)
+```
+
+## Repeating the experiment
+
+One sample is one draw. Let's repeat 1,000 times and see how the sampling distribution behaves:
+
+```{r}
+#| eval: true
+#| label: repeated-srs
+
+srs_results <- map_dbl(1:1000, \(i) {
+  s <- population |> slice_sample(n = 1000)
+  mean(s$support)
+})
+
+tibble(estimate = srs_results) |>
+  ggplot(aes(x = estimate)) +
+  geom_histogram(bins = 40, fill = "#1D375B", alpha = 0.8) +
+  geom_vline(xintercept = true_support, color = "#C2001A", linewidth = 1) +
+  labs(
+    title = "Sampling distribution under SRS (n = 1,000)",
+    subtitle = paste0("Red line = true population value (", round(true_support, 3), ")"),
+    x = "Sample proportion", y = "Count"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+The distribution is centered on the truth — that's what **unbiasedness** looks like.
+
+## A biased sample: simulating opt-in self-selection
+
+Now let's simulate what happens when participation is not random. Suppose younger, more educated people are much more likely to respond (as in many online opt-in surveys):
+
+```{r}
+#| eval: true
+#| label: biased-sample
+
+# Response probability depends on demographics
+population_with_response <- population |>
+  mutate(
+    p_respond = case_when(
+      age_group == "18-29" & education == "high" ~ 0.15,
+      age_group == "18-29" & education == "medium" ~ 0.10,
+      age_group == "18-29" & education == "low" ~ 0.04,
+      age_group == "30-49" & education == "high" ~ 0.12,
+      age_group == "30-49" & education == "medium" ~ 0.07,
+      age_group == "30-49" & education == "low" ~ 0.03,
+      age_group == "50-64" & education == "high" ~ 0.08,
+      age_group == "50-64" & education == "medium" ~ 0.04,
+      age_group == "50-64" & education == "low" ~ 0.02,
+      age_group == "65+" & education == "high" ~ 0.05,
+      age_group == "65+" & education == "medium" ~ 0.02,
+      age_group == "65+" & education == "low" ~ 0.01,
+    ),
+    responds = rbinom(N, 1, p_respond)
+  )
+
+biased_sample <- population_with_response |> filter(responds == 1)
+
+cat("Biased sample size:", nrow(biased_sample), "\n")
+cat("Biased estimate:", round(mean(biased_sample$support), 3), "\n")
+cat("True value:", round(true_support, 3), "\n")
+cat("Bias:", round(mean(biased_sample$support) - true_support, 3), "\n")
+```
+
+Despite a large sample, the biased estimate is far from the truth — **this is the big data paradox in action**.
+
+## The big data paradox: sample size vs. bias
+
+Let's see what happens as we grow the biased sample. The key insight: the confidence interval shrinks, but it narrows around the **wrong value**.
+
+```{r}
+#| eval: true
+#| label: big-data-paradox
+
+# Simulate biased samples of increasing size
+biased_increasing <- map_dfr(c(100, 500, 1000, 5000, 10000, 50000), \(target_n) {
+  # Draw a large pool with self-selection, then subsample to target size
+  pool <- population_with_response |> filter(responds == 1)
+  s <- pool |> slice_sample(n = min(target_n, nrow(pool)))
+  p_hat <- mean(s$support)
+  se <- sqrt(p_hat * (1 - p_hat) / nrow(s))
+  tibble(
+    n = nrow(s),
+    estimate = p_hat,
+    ci_low = p_hat - 1.96 * se,
+    ci_high = p_hat + 1.96 * se
+  )
+})
+
+ggplot(biased_increasing, aes(x = factor(n), y = estimate)) +
+  geom_point(size = 3, color = "#1D375B") +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.2, color = "#1D375B") +
+  geom_hline(yintercept = true_support, color = "#C2001A", linewidth = 1, linetype = "dashed") +
+  labs(
+    title = "The Big Data Paradox: more data, more confident — and more wrong",
+    subtitle = "Dashed red = true value. CI narrows but doesn't cover the truth.",
+    x = "Sample size (biased)", y = "Estimated support"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+::: {.callout-important}
+## Key takeaway
+
+The confidence interval formula $\hat{p} \pm 1.96\sqrt{\hat{p}(1-\hat{p})/n}$ assumes random sampling. Applied to a biased sample, it produces intervals that are **narrow and wrong** — the most dangerous combination.
+:::
+
+## But what about the finite population correction?
+
+You might wonder: shouldn't we account for the fact that a survey of 50,000 covers half our population of 100,000? Yes — for truly random samples, the **finite population correction** (FPC) adjusts the standard error by the factor $\sqrt{(N-n)/N}$. But this factor is only meaningful when the sample is a substantial fraction of the population. In real life, Germany has ~60 million eligible voters, so even a survey of 50,000 barely makes a dent.
+
+```{r}
+#| eval: true
+#| label: fpc-demo
+
+# Show how the FPC behaves at different sampling fractions
+fpc_table <- tibble(
+  label = c(
+    "n=1,000 of N=100,000",
+    "n=10,000 of N=100,000",
+    "n=50,000 of N=100,000",
+    "n=80,000 of N=100,000",
+    "n=90,000 of N=100,000",
+    "n=95,000 of N=100,000",
+    "n=1,000 of N=60,000,000",
+    "n=10,000 of N=60,000,000",
+    "n=50,000 of N=60,000,000"
+  ),
+  n = c(1000, 10000, 50000, 80000, 90000, 95000, 1000, 10000, 50000),
+  N_pop = c(rep(100000, 6), rep(60000000, 3))
+) |>
+  mutate(
+    sampling_fraction = n / N_pop,
+    fpc_factor = sqrt((N_pop - n) / N_pop),
+    se_without_fpc = sqrt(0.5 * 0.5 / n),    # worst-case p = 0.5
+    se_with_fpc = se_without_fpc * fpc_factor,
+    reduction_pct = round((1 - fpc_factor) * 100, 2)
+  )
+
+fpc_table |>
+  select(label, sampling_fraction, fpc_factor, reduction_pct) |>
+  rename(
+    Scenario = label,
+    `Sampling fraction` = sampling_fraction,
+    `FPC factor` = fpc_factor,
+    `SE reduction (%)` = reduction_pct
+  )
+```
+
+For our simulation (N = 100,000), surveying half the population does shrink the SE substantially. But in the real world (N = 60 million), even n = 50,000 reduces the SE by less than 0.05%. The FPC is irrelevant at realistic population sizes.
+
+The key point: **the FPC only helps with random error, not with bias.** Even if you surveyed 50k out of 60 million Germans via an opt-in online panel, the remaining bias from self-selection would still dominate. That's why tens of thousands of biased respondents can be worse than 1,000 randomly selected ones.
+
+```{r}
+#| eval: true
+#| label: fpc-vs-bias-plot
+
+# Compare: FPC-corrected SE (random sample) vs. actual error (biased sample)
+comparison_fpc <- tibble(
+  n = c(100, 500, 1000, 5000, 10000, 50000)
+) |>
+  mutate(
+    # SE with FPC for a random sample (p = true_support, N = 100,000)
+    se_random_fpc = sqrt(true_support * (1 - true_support) / n) *
+                    sqrt((100000 - n) / 100000),
+    # Actual error from biased samples (re-use earlier simulation)
+    bias_error = map_dbl(n, \(target_n) {
+      pool <- population_with_response |> filter(responds == 1)
+      s <- pool |> slice_sample(n = min(target_n, nrow(pool)))
+      abs(mean(s$support) - true_support)
+    })
+  )
+
+ggplot(comparison_fpc, aes(x = n)) +
+  geom_line(aes(y = se_random_fpc, color = "Random sample (SE with FPC)"),
+            linewidth = 1) +
+  geom_point(aes(y = se_random_fpc, color = "Random sample (SE with FPC)"),
+             size = 3) +
+  geom_line(aes(y = bias_error, color = "Biased sample (actual error)"),
+            linewidth = 1, linetype = "dashed") +
+  geom_point(aes(y = bias_error, color = "Biased sample (actual error)"),
+             size = 3) +
+  scale_x_log10(labels = scales::comma) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_color_manual(values = c(
+    "Random sample (SE with FPC)" = "#1D375B",
+    "Biased sample (actual error)" = "#C2001A"
+  )) +
+  labs(
+    title = "The finite population correction doesn't save biased samples",
+    subtitle = "Random sample error shrinks with n; biased error stays flat",
+    x = "Sample size (log scale)", y = "Error",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+```
+
+::: {.callout-note}
+## Bottom line
+
+The FPC is a technicality that only matters in small-population settings (e.g., surveying employees of a company). For national surveys, **sample size beyond ~1,500 buys you very little additional precision** — and no amount of additional biased data compensates for non-random selection. This is why a Civey poll of 10,000 self-selected online respondents is not automatically better than an infratest dimap telephone poll of 1,200.
+:::
+
+---
+
+# Part 2: Weighting Survey Data {#weighting}
+
+Weighting is how pollsters correct for known demographic imbalances. Let's fix the biased sample from Part 1 using post-stratification weights.
+
+## Computing weights manually
+
+```{r}
+#| eval: true
+#| label: manual-weights
+
+# True population margins
+pop_margins <- population |>
+  count(age_group) |>
+  mutate(pop_prop = n / sum(n)) |>
+  select(age_group, pop_prop)
+
+# Sample margins
+sample_margins <- biased_sample |>
+  count(age_group) |>
+  mutate(sample_prop = n / sum(n)) |>
+  select(age_group, sample_prop)
+
+# Compute post-stratification weights
+weight_table <- pop_margins |>
+  left_join(sample_margins, by = "age_group") |>
+  mutate(weight = pop_prop / sample_prop)
+
+weight_table
+```
+
+```{r}
+#| eval: true
+#| label: apply-weights
+
+# Apply weights to the biased sample
+biased_weighted <- biased_sample |>
+  left_join(weight_table |> select(age_group, weight), by = "age_group")
+
+# Weighted estimate
+weighted_est <- sum(biased_weighted$support * biased_weighted$weight) /
+                sum(biased_weighted$weight)
+
+cat("Unweighted estimate:", round(mean(biased_sample$support), 3), "\n")
+cat("Weighted by age:", round(weighted_est, 3), "\n")
+cat("True value:", round(true_support, 3), "\n")
+```
+
+Weighting by age alone improves the estimate, but it may not fully correct the bias — because education also matters. In practice, pollsters weight on multiple variables simultaneously using **raking**.
+
+## Weighting with the survey package
+
+The `survey` package (and its tidyverse-friendly wrapper `srvyr`) is the standard tool for analyzing weighted survey data in R. It correctly adjusts standard errors for the weighting.
+
+```{r}
+#| eval: true
+#| label: survey-package
+
+library(survey)
+library(srvyr)
+
+# Create a survey design object with our computed weights
+biased_design <- biased_weighted |>
+  as_survey_design(weights = weight)
+
+# Weighted mean with correct SE
+result <- biased_design |>
+  summarize(
+    support = survey_mean(support, vartype = "ci")
+  )
+
+result
+```
+
+::: {.callout-tip}
+## Why use the survey package?
+
+When you compute a weighted mean "by hand" (as above), you get the point estimate right. But the standard error needs to account for the weighting — observations with larger weights contribute more variance. The `survey` package handles this automatically, producing correct confidence intervals that are wider than naive ones.
+:::
+
+## Raking: weighting on multiple dimensions
+
+In practice, pollsters don't just weight on one variable — they use **raking** (iterative proportional fitting) to match multiple margins simultaneously. Here's how with the `survey` package:
+
+```{r}
+#| eval: true
+#| label: raking
+
+# Population margins for raking
+pop_age <- data.frame(
+  age_group = c("18-29", "30-49", "50-64", "65+"),
+  Freq = c(0.15, 0.30, 0.28, 0.27) * nrow(biased_sample)
+)
+
+pop_education <- data.frame(
+  education = c("low", "medium", "high"),
+  Freq = c(0.30, 0.45, 0.25) * nrow(biased_sample)
+)
+
+pop_region <- data.frame(
+  region = c("West", "East"),
+  Freq = c(0.80, 0.20) * nrow(biased_sample)
+)
+
+# Start with an unweighted design
+unweighted_design <- svydesign(ids = ~1, data = biased_sample)
+
+# Rake to match all three margins
+raked_design <- rake(
+  unweighted_design,
+  sample.margins = list(~age_group, ~education, ~region),
+  population.margins = list(pop_age, pop_education, pop_region)
+)
+
+# Raked estimate
+svymean(~support, raked_design)
+```
+
+```{r}
+#| eval: true
+#| label: compare-estimates
+
+# Compare all estimates
+comparison <- tibble(
+  Method = c("True value", "Unweighted (biased)", "Weighted by age only",
+             "Raked (age + edu + region)"),
+  Estimate = c(
+    true_support,
+    mean(biased_sample$support),
+    weighted_est,
+    as.numeric(svymean(~support, raked_design))
+  )
+)
+
+comparison
+```
+
+::: {.callout-note}
+## For the slides
+
+This demonstrates the key lesson: weighting reduces bias, but **cannot eliminate it entirely** if the response mechanism depends on variables you're not weighting on, or if entire groups are missing from the sample. Weighting is correction, not magic.
+:::
+
+## A major caveat: why weighting works so well here
+
+In our simulation, raking gets us very close to the truth. That's not an accident — it's because **we designed it that way**. We built a world where support depends on age, education, and region, and then we weighted on exactly those variables. The weighting targets match the bias mechanism perfectly.
+
+In reality, we almost never know:
+
+- **Which variables drive both self-selection and the outcome.** Maybe people who respond to online polls are more politically engaged, more opinionated, or more lonely — and those traits correlate with their answers in ways that age and education can't capture.
+- **Whether the relationship between demographics and opinions is the same among respondents and non-respondents.** A 65-year-old who eagerly joins a YouGov panel may have very different views from a 65-year-old who doesn't use the internet at all — even though they get the same weight.
+- **Whether our census benchmarks are right.** We weight to match the population on education, but educational categories differ across surveys and census data.
+
+To see this, let's add a hidden variable that affects both response and support — but that we *can't* weight on:
+
+```{r}
+#| eval: true
+#| label: hidden-confounder
+
+# Add "political engagement" — a hidden variable that affects both
+# who responds AND what they think
+pop_hidden <- population_with_response |>
+  mutate(
+    # Political engagement: correlated with education but not identical
+    engagement = case_when(
+      education == "high" ~ rbinom(n(), 1, 0.6),
+      education == "medium" ~ rbinom(n(), 1, 0.35),
+      education == "low" ~ rbinom(n(), 1, 0.15)
+    ),
+    # Engaged people are more likely to support AND more likely to respond
+    support_v2 = rbinom(n(), 1, pmin(1, p_support + 0.12 * engagement)),
+    p_respond_v2 = case_when(
+      engagement == 1 ~ p_respond * 3,  # engaged people respond 3x more
+      TRUE ~ p_respond * 0.5
+    ) |> pmin(1),
+    responds_v2 = rbinom(n(), 1, p_respond_v2)
+  )
+
+true_support_v2 <- mean(pop_hidden$support_v2)
+biased_v2 <- pop_hidden |> filter(responds_v2 == 1)
+
+# Rake on the same variables as before
+pop_age_v2 <- data.frame(
+  age_group = c("18-29", "30-49", "50-64", "65+"),
+  Freq = c(0.15, 0.30, 0.28, 0.27) * nrow(biased_v2)
+)
+pop_edu_v2 <- data.frame(
+  education = c("low", "medium", "high"),
+  Freq = c(0.30, 0.45, 0.25) * nrow(biased_v2)
+)
+pop_reg_v2 <- data.frame(
+  region = c("West", "East"),
+  Freq = c(0.80, 0.20) * nrow(biased_v2)
+)
+
+raked_v2 <- rake(
+  svydesign(ids = ~1, data = biased_v2),
+  sample.margins = list(~age_group, ~education, ~region),
+  population.margins = list(pop_age_v2, pop_edu_v2, pop_reg_v2)
+)
+
+tibble(
+  Method = c("True value", "Unweighted (biased)",
+             "Raked (age + edu + region)"),
+  Estimate = c(
+    true_support_v2,
+    mean(biased_v2$support_v2),
+    as.numeric(svymean(~support_v2, raked_v2))
+  )
+) |>
+  mutate(Residual_bias = Estimate - true_support_v2)
+```
+
+Now raking still helps, but a residual bias remains — because the hidden confounder (political engagement) drives both selection and opinion, and we can't weight on it. This is the situation pollsters face every day: **you can only weight on what you can measure, and the things that make people respond to surveys are often the same things that shape their opinions.**
+
+::: {.callout-warning}
+## The limits of weighting
+
+In the real world, weighting is necessary but not sufficient. It corrects for **observable** imbalances (too few old people, too many graduates) but cannot fix **unobservable** ones (too many politically engaged people, too few people who distrust surveys). This is the fundamental reason why non-probability samples remain controversial — no amount of post-hoc weighting can guarantee that the unmeasured confounders cancel out. The Pew 2023 benchmarking study found that even after extensive weighting, opt-in panels had roughly twice the average error of probability-based panels.
+:::
+
+---
+
+# Part 3: Visualizing Survey Uncertainty {#visualization}
+
+As data journalists, how you **present** survey results matters as much as how you compute them. This section focuses on communicating uncertainty honestly.
+
+## The problem with point estimates
+
+Most poll reporting looks like this: "42% of Germans support X." No interval. No caveat. This creates a false sense of precision. Let's build better visualizations.
+
+## Bar plot with uncertainty bands
+
+The bar chart is the most common format for Sonntagsfrage results. Most outlets show just the bars — no uncertainty. Adding error bars is straightforward and puts more emphasis on uncertainty:
+
+```{r}
+#| eval: true
+#| label: bar-uncertainty
+# Simulate poll results for multiple parties
+parties <- tibble(
+  party = c("CDU/CSU", "SPD", "Grüne", "AfD", "FDP", "BSW", "Linke"),
+  support = c(0.26, 0.15, 0.12, 0.24, 0.05, 0.03, 0.1),
+  n = 1200  # typical poll sample size
+) |>
+  mutate(
+    se = sqrt(support * (1 - support) / n),
+    ci_low = support - 1.96 * se,
+    ci_high = support + 1.96 * se
+  )
+
+# Party colors for consistent use
+party_colors <- c(
+  "CDU/CSU" = "#000000", "AfD" = "#009EE0", "SPD" = "#E3000F",
+  "Grüne" = "#64A12D", "BSW" = "#7B2D8B", "FDP" = "#FFED00",
+  "Linke" = "#BE3075"
+)
+
+ggplot(parties, aes(x = reorder(party, -support), y = support, fill = party)) +
+  geom_col(alpha = 0.85, width = 0.7) +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high),
+                width = 0.2, linewidth = 0.6, color = "gray30") +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "gray50",
+             linewidth = 0.5) +
+  annotate("text", x = 7.3, y = 0.058, label = "5% threshold",
+           size = 3, color = "gray50", hjust = 1) +
+  scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0),
+                     limits = c(0, 0.36)) +
+  scale_fill_manual(values = party_colors) +
+  labs(
+    title = "Sonntagsfrage with 95% confidence intervals",
+    subtitle = paste0(
+      "n = ", parties$n[1],
+      ". The error bars show: a party polling at 5% could be at 3.5–6.5%."
+    ),
+    x = NULL, y = "Vote share"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+```
+
+Notice: the FDP bar overlaps with the 5% threshold. A journalist reporting "FDP at 5%" should add that the party could plausibly be anywhere between ~3.5% and ~6.5% — making its entry into parliament genuinely uncertain.
+
+
+## Dot plots with simulated (or real) polling results
+
+Dot plots are more reduced than bar plots — they focus just the point estimate. Compared to the bar plot, they are more reduced - very much in the spirit of Edward Tufte's minimalist data-ink ratio. Also, that gives more room for useful context, such as indications of uncertainty or other polls:
+
+```{r}
+#| eval: true
+#| label: simulated-outcomes-scatter
+#| fig-height: 7
+
+# Simulate 100 possible election outcomes for all parties
+n_outcomes <- 100
+set.seed(2024)
+
+sim_outcomes <- parties |>
+  rowwise() |>
+  mutate(
+    sim_results = list(
+      rnorm(n_outcomes, mean = support,
+            sd = sqrt(support * (1 - support) / n))
+    )
+  ) |>
+  unnest(sim_results) |>
+  mutate(sim_id = rep(1:n_outcomes, times = nrow(parties)))
+
+# Track FDP's chances of clearing 5%
+fdp_sims <- sim_outcomes |> filter(party == "FDP")
+fdp_in_pct <- round(mean(fdp_sims$sim_results >= 0.05) * 100)
+
+ggplot(sim_outcomes, aes(x = sim_results,
+                         y = reorder(party, support),
+                         color = party)) +
+  geom_jitter(alpha = 0.35, size = 1.5, height = 0.15) +
+  # Poll point estimate as large diamond
+  geom_point(data = parties,
+             aes(x = support, y = reorder(party, support)),
+             size = 4, shape = 21, color = "black", fill = "white") +
+  # 5% threshold
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "gray50",
+             linewidth = 0.5) +
+  scale_x_continuous(labels = scales::percent_format(),
+                     limits = c(0, 0.36)) +
+  scale_color_manual(values = party_colors) +
+  labs(
+    title = "100 plausible election outcomes based on current polls",
+    subtitle = paste0(
+      "Each dot = one possible result. White dot = poll estimate. ",
+      "\nFDP clears 5% in only ", fdp_in_pct, "% of simulations."
+    ),
+    x = "Vote share", y = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+```
+
+This visualization turns an abstract "margin of error of ±2.6 percentage points" into something concrete: a cloud of dots representing plausible election nights. Readers can immediately see that the CDU/CSU and AfD clouds overlap and that the FDP straddles the 5% threshold.
+
+
+## Simulation histograms
+
+Another approach: instead of a single number per party, simulate thousands of *plausible election nights* and show the full distribution as overlapping histograms. This makes it immediately visible how much the outcomes of two close competitors can overlap.
+
+Let's build this for a close race — SPD vs. AfD in Brandenburg 2024, where polls had them nearly tied:
+
+```{r, fig.height = 4}
+#| eval: true
+#| label: dual-histogram
+
+# Simulate 10,000 election outcomes for a close race
+# Based on pre-election polls: SPD ~30%, AfD ~29%, n ≈ 1,200
+n_sims <- 10000
+n_poll <- 1200
+
+spd_poll <- 0.30
+afd_poll <- 0.29
+
+# Each simulated outcome is a draw from the sampling distribution
+set.seed(2024)
+sims <- tibble(
+  sim = 1:n_sims,
+  SPD = rnorm(n_sims, mean = spd_poll,
+             sd = sqrt(spd_poll * (1 - spd_poll) / n_poll)),
+  AfD = rnorm(n_sims, mean = afd_poll,
+             sd = sqrt(afd_poll * (1 - afd_poll) / n_poll))
+) |>
+  mutate(spd_wins = SPD > AfD)
+
+spd_win_pct <- round(mean(sims$spd_wins) * 100)
+
+# Pivot for overlapping histograms
+sims_long <- sims |>
+  pivot_longer(cols = c(SPD, AfD), names_to = "party", values_to = "vote_share")
+
+ggplot(sims_long, aes(x = vote_share, fill = party)) +
+  geom_histogram(alpha = 0.5, bins = 60, position = "identity",
+                 color = "white", linewidth = 0.1) +
+  geom_vline(xintercept = spd_poll, linetype = "dashed",
+             color = "#E3000F", linewidth = 0.7) +
+  geom_vline(xintercept = afd_poll, linetype = "dashed",
+             color = "#009EE0", linewidth = 0.7) +
+  scale_fill_manual(values = c("SPD" = "#E3000F", "AfD" = "#009EE0")) +
+  scale_x_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "10,000 simulated election nights: SPD vs. AfD in Brandenburg",
+    subtitle = paste0(
+      "SPD finishes ahead in ", spd_win_pct, "% of simulations. ",
+      "\nThe overlap shows why this race was genuinely a toss-up."
+    ),
+    x = "Vote share", y = "Number of simulated outcomes",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = c(0.85, 0.85))
+```
+
+::: {.callout-tip}
+## Why this works
+
+The dual histogram makes the **overlap** viscerally obvious. Readers can *see* that in thousands of plausible outcomes, either party could win. Compare this to "SPD 30%, AfD 29%" — which sounds like SPD is ahead, full stop. One limitation of the dual histogram is that it only works really well for two-party races.
+:::
+
+
+## Discretized gradient plots (Yang et al. 2023)
+
+Yang et al. (from our session on how people understand numbers and visuals) tested four uncertainty visualization formats during the 2022 U.S. midterms. Their **dual histogram intervals** (Figure 1C) use a distinctive design: horizontal bars split into discrete bins where **color saturation encodes likelihood** — the most saturated bin sits at the point estimate, and saturation fades symmetrically toward the tails. This tested as the most effective format across all their outcome measures (emotion, trust, participation intention). Here we adapt it for multi-party German polls. Each party gets a row of discrete tiles, colored in the party color with saturation decreasing away from the center:
+
+```{r, fig.height = 5}
+#| eval: true
+#| label: discretized-gradient
+#| fig-height: 7
+
+library(colorspace)
+
+# Number of discrete bins per side of the point estimate
+n_bins <- 8
+
+# Build discrete bins for each party
+gradient_bins <- parties |>
+  rowwise() |>
+  mutate(
+    # Create bin centers spanning ~3.5 SE on each side
+    bin_center = list({
+      half_range <- 3.5 * se
+      bin_width <- (2 * half_range) / (2 * n_bins)
+      seq(support - half_range + bin_width / 2,
+          support + half_range - bin_width / 2,
+          by = bin_width)
+    }),
+    bin_width = list(rep((2 * 3.5 * se) / (2 * n_bins), 2 * n_bins))
+  ) |>
+  unnest(c(bin_center, bin_width)) |>
+  ungroup() |>
+  mutate(
+    # Distance from point estimate in SE units
+    dist_se = abs(bin_center - support) / se,
+    # Density at bin center, normalized to [0, 1] per party
+    raw_density = dnorm(dist_se)
+  ) |>
+  group_by(party) |>
+  mutate(
+    norm_density = raw_density / max(raw_density)
+  ) |>
+  ungroup()
+
+# Create faded color for each bin:
+# Full party color at center, blending toward white at the tails.
+# lighten() works for all colors including black (CDU) and yellow (FDP),
+# unlike desaturate() which has no effect on achromatic colors.
+gradient_bins <- gradient_bins |>
+  mutate(
+    base_color = party_colors[party],
+    fade_amount = 1 - norm_density,
+    tile_color = map2_chr(base_color, fade_amount, \(col, amt) {
+      lighten(col, amount = amt, space = "HLS")
+    })
+  )
+
+# CI range labels
+ci_labels <- parties |>
+  mutate(
+    label = paste0(
+      round(ci_low * 100, 1), "%–", round(ci_high * 100, 1), "%"
+    )
+  )
+
+ggplot(gradient_bins) +
+  geom_tile(
+    aes(x = bin_center, y = reorder(party, support),
+        width = bin_width, fill = tile_color),
+    height = 0.55,
+    color = "white", linewidth = 0.3
+  ) +
+  scale_fill_identity() +
+  # CI range as text annotation
+  geom_text(
+    data = ci_labels,
+    aes(x = ci_high + 0.012, y = reorder(party, support),
+        label = label),
+    size = 3, hjust = 0, color = "gray40"
+  ) +
+  # 5% threshold
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "gray50",
+             linewidth = 0.5) +
+  scale_x_continuous(
+    labels = scales::percent_format(),
+    limits = c(0, 0.40),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title = "Discretized gradient plot: saturated color = more likely outcome",
+    subtitle = paste0(
+      "n = ", parties$n[1],
+      ". Each tile is one bin of the sampling distribution.",
+      "\nInspired by Yang et al. (2023)."
+    ),
+    x = "Vote share", y = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+```
+
+The discrete bins make the shape of uncertainty tangible in a way that a single error bar cannot. The fully saturated center tile says "most likely here"; the pale tails fading toward white say "possible but unlikely." Yang et al. found that this format — which they call *dual histogram intervals* — showed the strongest effects on emotion, trust, and participation intention across all visualization types they tested.
+
+Reference: Yang, F., Cai, M., et al. (2023). [Swaying the Public? Impacts of Election Forecast Visualizations on Emotion, Trust, and Intention in the 2022 U.S. Midterms](https://mucollective.northwestern.edu/files/2023-US_midterm.pdf). *IEEE TVCG*, 30(1), 23–33.
+
+
+---
+
+# Further reading
+
+- Thomas Lumley, [Complex Surveys: A Guide to Analysis Using R](https://onlinelibrary.wiley.com/doi/book/10.1002/9780470580066) — the definitive guide to the `survey` package.
+- The `srvyr` vignette: `vignette("srvyr-vs-survey")` — tidyverse-style survey analysis.
+- ZEIT ONLINE (2024). [Landtagswahl Brandenburg: Umfragen und Wahlausgang](https://www.zeit.de/politik/deutschland/2024-09/landtagswahl-brandenburg-umfragen-wahlausgang) — exemplary interactive uncertainty visualization.
+
+---
+
+::: {.callout-note collapse="true"}
+## Session info
+
+```{r}
+#| eval: true
+sessionInfo()
+```
+:::

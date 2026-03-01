@@ -182,6 +182,63 @@ resp |> resp_headers()
 When you use your browser to interact with a website, every HTTP request your browser makes is visible in the **Network tab** of the developer tools. This means you can inspect the exact URL, method, headers, and body of any request — and then reproduce it in R. That is the entire basis of the undocumented API technique in Part 3.
 :::
 
+## Exercises {#exercises-p1}
+
+**Exercise 1 (easy) — Inspect a response with `httpbin`**
+
+[httpbin.org](https://httpbin.org) is a free testing service that echoes back whatever request you send it. Send a GET request to `https://httpbin.org/get` with two query parameters of your choice and inspect the result. What does `$args` contain? What user-agent does R report?
+
+::: {.callout-note collapse="true"}
+## Solution
+
+```r
+resp <- request("https://httpbin.org/get") |>
+  req_url_query(city = "Berlin", year = 2025) |>
+  req_perform()
+
+resp_status(resp)
+# [1] 200
+
+body <- resp_body_json(resp)
+body$args
+# $city  "Berlin"
+# $year  "2025"
+
+body$headers$`User-Agent`
+# "libcurl/8.x httr2/1.x r-curl/5.x"
+```
+
+The `$args` field echoes your query parameters back — confirming the server received them. The `User-Agent` shows R's default identifier; override it with `req_headers("User-Agent" = "MyScript/1.0")` for polite API usage.
+:::
+
+---
+
+**Exercise 2 (intermediate) — Send a POST request with a JSON body**
+
+Some APIs use POST rather than GET, with data sent in the request body instead of the URL. Use `req_body_json()` to POST a small payload to `https://httpbin.org/post`. Which field in the response contains your data? What `Content-Type` did httr2 set automatically?
+
+::: {.callout-note collapse="true"}
+## Solution
+
+```r
+resp <- request("https://httpbin.org/post") |>
+  req_body_json(list(name = "Anna", country = "DE", year = 2025)) |>
+  req_perform()
+
+body <- resp_body_json(resp)
+
+body$json
+# $name    "Anna"
+# $country "DE"
+# $year    2025
+
+body$headers$`Content-Type`
+# "application/json"
+```
+
+`req_body_json()` serialises the R list to JSON and sets `Content-Type: application/json` automatically — no manual header needed. Contrast with `req_url_query()`: GET puts parameters in the URL; POST puts them in the body. POST is necessary when the payload is large or sensitive, or when the server is doing computation rather than simple retrieval.
+:::
+
 ---
 
 # Part 2: API Refresher {#refresher}
@@ -252,13 +309,12 @@ Here's a small wrapper built directly on `httr2` that handles batching and retur
 #| eval: true
   
 genderize <- function(names) {
-  # Split into batches of 10 (API limit)
   batches <- split(names, ceiling(seq_along(names) / 10))
 
   map(batches, \(batch) {
     resp <- request("https://api.genderize.io") |>
       req_url_query(!!!setNames(as.list(batch), rep("name[]", length(batch)))) |>
-      req_throttle(10 / 60) |>   # stay well within limits
+      req_throttle(10 / 60) |>
       req_perform()
 
     resp |>
@@ -275,15 +331,13 @@ genderize(c("James", "Sophie", "Amara")) |>
 
 ### Mini-audit: confidence by name origin
 
-Now use the helper to run a small fairness audit — does confidence vary systematically by where names come from?
-
 ```{r}
 #| eval: true
-#| 
+
 names_df <- tibble(
-  name   = c("James", "Sophie", "Ingrid",   # W. European
-             "Amara", "Chioma", "Kwame",     # Sub-Saharan African
-             "Wei",   "Yuki",   "Ji-ho"),    # East Asian
+  name   = c("James", "Sophie", "Ingrid",
+             "Amara", "Chioma", "Kwame",
+             "Wei",   "Yuki",   "Ji-ho"),
   region = c(rep("W. European", 3),
              rep("Sub-Saharan African", 3),
              rep("East Asian", 3))
@@ -310,6 +364,51 @@ ggplot(results, aes(x = reorder(name, probability), y = probability, fill = regi
 - What do low `count` values tell you about the training data?
 - If a company uses genderize.io to personalise emails, what's the downstream effect of low-confidence predictions?
 - How would you design a more rigorous audit — what would your name sample look like, and what would you measure?
+:::
+
+## Exercises {#exercises-p2}
+
+**Exercise 1 (easy) — Look up your own name**
+
+Query genderize.io with your own first name (or a colleague's). Then query it again with a name from a very different cultural background — e.g. "Kwabena", "Priyanka", or "Seun". Compare the `probability` and `count` values. What do the differences tell you?
+
+::: {.callout-note collapse="true"}
+## Solution
+
+```r
+genderize(c("Simon", "Kwabena")) |>
+  select(name, gender, probability, count)
+
+#   name    gender probability  count
+#   Simon   male   0.99         304891
+#   Kwabena male   0.97         153
+```
+
+The `count` for "Kwabena" (a common Akan name from Ghana) is orders of magnitude lower than for "Simon". This low count drives the model's uncertainty in edge cases and reflects the Western skew of the training data — even when the `probability` happens to look high, the model has seen very few examples of that name.
+:::
+
+---
+
+**Exercise 2 (intermediate) — Audit German party leaders**
+
+The Bundestag has six parliamentary groups (Fraktionen). Feed the first names of their current leaders into `genderize()` and visualise the results. What does the confidence pattern look like — and why might it be misleading to use this API for political reporting on non-Western politicians?
+
+::: {.callout-note collapse="true"}
+## Solution
+
+```r
+leaders <- tibble(
+  name  = c("Friedrich", "Olaf", "Robert", "Alice", "Sahra", "Anton"),
+  party = c("CDU/CSU", "SPD", "Grüne", "AfD", "BSW", "FDP")
+)
+
+genderize(leaders$name) |>
+  left_join(leaders, by = "name") |>
+  select(name, party, gender, probability, count) |>
+  arrange(probability)
+```
+
+All six names are common in German and score very high confidence (>0.97) — which is expected. The exercise is more revealing when you swap in names of politicians from minority backgrounds or from non-European countries: confidence and `count` drop sharply, making the model unreliable for exactly the groups it's most likely to misclassify. This is the core fairness concern with name-based gender inference in journalism.
 :::
 
 ---
@@ -345,7 +444,7 @@ This makes Wikipedia an ideal first target: the API is stable, requires no authe
 
 We'll use Wikipedia's search as our target. The goal is to intercept the API call the website makes when you search, and reproduce it in R.
 
-### Step 1: Open the browser developer tools
+### Step 1: Open the browser developer tools {#p3-step1}
 
 Navigate to [en.wikipedia.org](https://en.wikipedia.org/wiki/Main_Page) and open the developer tools:
 
@@ -354,18 +453,18 @@ Navigate to [en.wikipedia.org](https://en.wikipedia.org/wiki/Main_Page) and open
 
 Click the **Network** tab.
 
-### Step 2: Trigger a search request
+### Step 2: Trigger a search request {#p3-step2}
 
 Click **Fetch/XHR** in the filter bar to show only API calls. Then type **"Hertie"** into the Wikipedia search box at the top of the page. New entries will appear in the Network panel as autocomplete results load.
 
-### Step 3: Find the data request
+### Step 3: Find the data request {#p3-step3}
 
 Look for a request with a URL containing `/rest.php/v1/search/`. Click it and inspect:
 
 - **Headers tab** → method is `GET`, URL is `https://en.wikipedia.org/w/rest.php/v1/search/title?q=Hertie&limit=10`
 - **Response tab** → a JSON object with a `pages` array, each entry containing `id`, `title`, `description`, and `thumbnail`
 
-### Step 4: Copy as cURL and convert
+### Step 4: Copy as cURL and convert {#p3-step4}
 
 Right-click the request → **Copy** → **Copy as cURL**.
 
@@ -373,7 +472,6 @@ Paste into [curlconverter.com](https://curlconverter.com/) and select **R**. You
 
 ```{r}
 #| label: curlconverter-raw
-# Raw output from curlconverter.com — this works, but contains a lot of noise
 library(httr2)
 
 wiki_out <-
@@ -410,9 +508,9 @@ curlconverter faithfully copies **everything** your browser sent — including s
 Everything else (Sec-Fetch-*, DNT, Priority) is browser metadata that servers typically ignore. You can remove it to keep your code clean.
 :::
 
-### Step 5: A minimal working request
+### Step 5: A minimal working request {#p3-step5}
 
-Once you know what the API needs, strip it down. For Wikipedia's search endpoint, all that's required is the query and a sensible `User-Agent` (Wikipedia's API policy asks that you identify your client):
+Once you know what the API needs, strip it down. For Wikipedia's search endpoint, all that's required is the query and a sensible `User-Agent`:
 
 ```{r}
 #| label: minimal-request
@@ -433,18 +531,12 @@ wiki_out <-
 resp_status(wiki_out)  # 200 = success
 ```
 
-### Step 6: Parse the response
+### Step 6: Parse the response {#p3-step6}
 
 ```{r}
 #| label: parse-wiki
 #| eval: true
 
-# Option A: manual with jsonlite — gives full control
-wiki_out |>
-  resp_body_string() |>
-  jsonlite::fromJSON()
-
-# Option B: simplifyVector = TRUE — auto-converts to data frame
 wiki_df <-
   wiki_out |>
   resp_body_json(simplifyVector = TRUE) |>
@@ -453,7 +545,7 @@ wiki_df <-
 wiki_df
 ```
 
-`simplifyVector = TRUE` passes a flag to jsonlite that collapses lists of uniform objects directly into a data frame — no manual mapping needed. The `thumbnail` column comes out as a nested data frame; flatten it with `unnest_wider()`:
+`simplifyVector = TRUE` passes a flag to jsonlite that collapses lists of uniform objects directly into a data frame. The `thumbnail` column comes out as a nested data frame; flatten it with `unnest_wider()`:
 
 ```{r}
 #| label: flatten-wiki
@@ -463,9 +555,7 @@ wiki_df |>
   select(id, title, description, thumbnail_url, thumbnail_width, thumbnail_height)
 ```
 
-### Step 7: Explore the API further
-
-The endpoint we found is just one of several. Wikipedia's REST API also offers:
+### Step 7: Explore the API further {#p3-step7}
 
 ```{r}
 #| label: wiki-explore
@@ -480,8 +570,6 @@ request("https://en.wikipedia.org/w/rest.php/v1/search/page") |>
   pluck("pages") |>
   select(title, description, excerpt)
 ```
-
-The `excerpt` field returns a snippet of article text with the search term highlighted — useful for quickly assessing relevance.
 
 ```{r}
 #| label: wiki-paginate
@@ -505,7 +593,76 @@ page2 <-
 - Cache results locally — don't re-fetch data you already have.
 :::
 
-### ✋ Your turn
+## Exercises {#exercises-p3}
+
+**Exercise 1 (easy) — Search for your city**
+
+Use the Wikipedia title-search endpoint to retrieve the top 10 results for your hometown or a city of your choice. How many results have a non-empty `description` field?
+
+::: {.callout-note collapse="true"}
+## Solution
+
+```r
+city_results <-
+  request("https://en.wikipedia.org/w/rest.php/v1/search/title") |>
+  req_url_query(q = "Berlin", limit = 10) |>
+  req_headers(`User-Agent`      = "DataJournalismCourse/1.0",
+              `Accept-Encoding` = "gzip, deflate") |>
+  req_perform() |>
+  resp_body_json(simplifyVector = TRUE) |>
+  pluck("pages")
+
+city_results |>
+  select(title, description) |>
+  mutate(has_description = !is.na(description) & description != "")
+
+# Count
+sum(!is.na(city_results$description))
+```
+
+The title-search endpoint matches article titles, not body text — so "Berlin" returns the city article first, then districts, suburbs, and disambiguation pages. Articles for the main topic usually have descriptions; stubs and disambiguation pages often don't.
+:::
+
+---
+
+**Exercise 2 (intermediate) — Compare title search vs. full-text search**
+
+Run the same query ("data journalism") through both the title-search endpoint (`/v1/search/title`) and the full-text search endpoint (`/v1/search/page`). Compare the results. Do they overlap? Which endpoint returns more relevant articles for a research task?
+
+::: {.callout-note collapse="true"}
+## Solution
+
+```r
+make_wiki_request <- function(endpoint, query, limit = 10) {
+  request(paste0("https://en.wikipedia.org/w/rest.php/v1/search/", endpoint)) |>
+    req_url_query(q = query, limit = limit) |>
+    req_headers(`User-Agent`      = "DataJournalismCourse/1.0",
+                `Accept-Encoding` = "gzip, deflate") |>
+    req_perform() |>
+    resp_body_json(simplifyVector = TRUE) |>
+    pluck("pages") |>
+    select(title, description) |>
+    mutate(endpoint = endpoint)
+}
+
+title_results <- make_wiki_request("title", "data journalism")
+page_results  <- make_wiki_request("page",  "data journalism")
+
+combined <- bind_rows(title_results, page_results)
+
+# Articles in both sets
+intersect(title_results$title, page_results$title)
+
+# Articles only in full-text search
+setdiff(page_results$title, title_results$title)
+```
+
+The title-search endpoint only matches articles whose *title* contains "data journalism" — a small set. The full-text endpoint searches article bodies and returns a broader, richer set of related articles (investigative journalism, computational journalism, newsroom tools). For exploratory research, full-text is usually more useful; for disambiguation lookups, title search is more precise.
+:::
+
+---
+
+### ✋ Your turn {#your-turn-p3}
 
 1. Go to [tiktok.com](https://www.tiktok.com/), open the Network tab (filter by **Fetch/XHR**), and type a search query into the search box. Look for requests that return JSON containing search suggestions or results.
 2. Copy one of those requests as cURL, convert it at curlconverter.com, clean up the headers (remove cookies, fix Accept-Encoding), and execute in R.
@@ -542,7 +699,6 @@ Mozilla Foundation's [YouTube Regrets](https://www.mozillafoundation.org/en/yout
 
 ---
 
-
 ## Tutorial: Browser automation with `selenider` {#automation-tutorial}
 
 [`selenider`](https://ashbythorpe.github.io/selenider/) is a modern R package that wraps Chrome via ChromeDriver. It has a clean, pipe-friendly API and excellent error messages — much easier to use than `RSelenium`.
@@ -553,7 +709,7 @@ Mozilla Foundation's [YouTube Regrets](https://www.mozillafoundation.org/en/yout
 **ChromeDriver** is a small server that acts as a bridge between your R code and a real Chrome browser. When `selenider` opens a browser window, it is actually sending commands to ChromeDriver, which translates them into Chrome's internal automation protocol (the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)). ChromeDriver must match the version of Chrome installed on your machine — `selenider::install_selenider()` handles this automatically by downloading the correct driver via the `wdman` package.
 :::
 
-### Step 1: Start a browser session
+### Step 1: Start a browser session {#p4-step1}
 
 ```{r}
 #| label: selenider-setup
@@ -561,14 +717,13 @@ library(tidyverse)
 library(rvest)
 library(selenider)
 
-# Open a Chrome window (set headless = FALSE to watch it work)
 session <- selenider_session(
   "chromote",
   options = chromote_options(headless = FALSE, width = 1280, height = 900)
 )
 ```
 
-### Step 2: Navigate to YouTube and search
+### Step 2: Navigate to YouTube and search {#p4-step2}
 
 Try fetching a YouTube search page the ordinary way first, so you can see why browser automation is necessary:
 
@@ -577,8 +732,6 @@ Try fetching a YouTube search page the ordinary way first, so you can see why br
 
 library(rvest)
 
-# This returns almost no useful content — just a shell of HTML
-# with no video titles or metadata
 page <- read_html("https://www.youtube.com/results?search_query=climate+change")
 page |> html_elements("h3") |> html_text()
 # → character(0)   ← nothing there
@@ -596,29 +749,25 @@ open_url(
          URLencode(query, reserved = TRUE))
 )
 
-# Give the page time to load and the cookie popup to appear
 Sys.sleep(3)
 
 # Handle the cookie consent popup — click "Reject all" if it appears
 reject_btn <- s('#content > div.body.style-scope.ytd-consent-bump-v2-lightbox > div.eom-buttons.style-scope.ytd-consent-bump-v2-lightbox > div:nth-child(1) > ytd-button-renderer:nth-child(1) > yt-button-shape > button > yt-touch-feedback-shape > div.yt-spec-touch-feedback-shape__fill')
 if (is_present(reject_btn)) {
   elem_click(reject_btn)
-  Sys.sleep(2)  # wait for popup to close and page to settle
+  Sys.sleep(2)
 }
 
 Sys.sleep(2)
 ```
 
-### Step 3: Find elements on the rendered page
-
-Use the **Inspector** tab (right-click on a video title → Inspect) to identify CSS selectors. YouTube's selectors are stable because they use custom HTML elements (`ytd-*`) rather than generic class names.
+### Step 3: Find elements on the rendered page {#p4-step3}
 
 ```{r}
 #| label: find-elements
 
-# Each search result is wrapped in a ytd-video-renderer element
-result_cards <- ss("ytd-video-renderer")  # ss() = find ALL matching elements
-length(result_cards)  # how many results loaded?
+result_cards <- ss("ytd-video-renderer")
+length(result_cards)
 ```
 
 ::: {.callout-tip}
@@ -633,14 +782,13 @@ html <- read_html(get_page_source(session))
 This captures what is actually displayed in the browser — not the empty shell that `read_html(url)` would return directly.
 :::
 
-### Step 4: Extract data from rendered HTML
+### Step 4: Extract data from rendered HTML {#p4-step4}
 
 ```{r}
 #| label: extract-html
 
-html <- get_page_source()  # already returns an xml_document; no read_html() needed
+html <- get_page_source()
 
-# Video titles and URLs
 titles <- html |>
   html_elements("ytd-video-renderer #video-title") |>
   html_text(trim = TRUE)
@@ -650,36 +798,32 @@ urls <- html |>
   html_attr("href") |>
   (\(x) paste0("https://www.youtube.com", x))()
 
-# The channel name node contains two yt-formatted-string elements (visible + screen-reader copy).
-# We take every second element starting from the first to get one name per video.
+# YouTube renders two yt-formatted-string elements per channel
+# (visible + screen-reader copy); take every other one
 channels_raw <- html |>
   html_elements("ytd-video-renderer ytd-channel-name yt-formatted-string") |>
   html_text(trim = TRUE)
 channels <- channels_raw[seq(1, length(channels_raw), by = 2)]
 
-# View counts and upload dates appear together in the metadata line
 metadata <- html |>
   html_elements("ytd-video-renderer #metadata-line span") |>
   html_text(trim = TRUE)
 
-# Metadata comes in pairs: (view count, upload date) per video
 view_counts  <- metadata[seq(1, length(metadata), by = 2)]
 upload_dates <- metadata[seq(2, length(metadata), by = 2)]
 
 results <- tibble(
-  title       = titles,
-  channel     = channels,
-  views       = view_counts,
-  uploaded    = upload_dates,
-  url         = urls
+  title    = titles,
+  channel  = channels,
+  views    = view_counts,
+  uploaded = upload_dates,
+  url      = urls
 )
 
 results
 ```
 
-### Step 5: Collect results at scale with scrolling
-
-YouTube's search page uses **infinite scroll**: only ~20 results are rendered initially, and more are injected into the DOM as you scroll down. The function below automates this — it navigates to a query, handles the cookie popup, scrolls `n_scrolls` times (each scroll triggers a new batch of ~20 results), then extracts all visible results from the fully rendered page. Running the same function on multiple queries lets you compare what YouTube surfaces for different search terms — the basis of an algorithmic audit.
+### Step 5: Collect results at scale with scrolling {#p4-step5}
 
 ```{r}
 #| label: scroll-and-compare
@@ -691,25 +835,24 @@ collect_search_results <- function(query, n_scrolls = 3) {
   )
   Sys.sleep(3)
 
-  # Dismiss cookie popup if present
   reject_btn <- s('#content > div.body.style-scope.ytd-consent-bump-v2-lightbox > div.eom-buttons.style-scope.ytd-consent-bump-v2-lightbox > div:nth-child(1) > ytd-button-renderer:nth-child(1) > yt-button-shape > button > yt-touch-feedback-shape > div.yt-spec-touch-feedback-shape__fill')
   if (is_present(reject_btn)) {
     elem_click(reject_btn)
     Sys.sleep(2)
   }
 
-  # Scroll to the last visible result card to trigger lazy-loading of the next batch.
+  # Scroll to the last visible result card to trigger lazy-loading.
   # YouTube's infinite scroll fires when the last card enters the viewport,
-  # so scrolling to it is more reliable than a raw JS window.scrollBy().
+  # so elem_scroll_to() is more reliable than raw JS window.scrollBy().
   for (i in seq_len(n_scrolls)) {
     cards <- ss("ytd-video-renderer")
     elem_scroll_to(cards[[length(cards)]])
-    Sys.sleep(2)  # wait for new cards to render before scrolling again
+    Sys.sleep(2)
   }
 
   html <- get_page_source()
 
-  titles   <- html |> html_elements("ytd-video-renderer #video-title") |> html_text(trim = TRUE)
+  titles <- html |> html_elements("ytd-video-renderer #video-title") |> html_text(trim = TRUE)
   channels_raw <- html |> html_elements("ytd-video-renderer ytd-channel-name yt-formatted-string") |> html_text(trim = TRUE)
   channels <- channels_raw[seq(1, length(channels_raw), by = 2)]
   metadata <- html |> html_elements("ytd-video-renderer #metadata-line span") |> html_text(trim = TRUE)
@@ -727,7 +870,6 @@ collect_search_results <- function(query, n_scrolls = 3) {
   )
 }
 
-# Compare two related queries — what does YouTube surface differently?
 queries <- c("Klimawandel", "climate change")
 
 all_results <- map_dfr(queries, \(q) {
@@ -736,13 +878,12 @@ all_results <- map_dfr(queries, \(q) {
   collect_search_results(q, n_scrolls = 3)
 })
 
-# Which channels appear for both queries vs. only one?
 all_results |>
   count(query, channel, sort = TRUE) |>
   pivot_wider(names_from = query, values_from = n, values_fill = 0)
 ```
 
-### Step 6: Close the session
+### Step 6: Close the session {#p4-step6}
 
 ```{r}
 #| label: close
@@ -758,18 +899,84 @@ close_session(session)
 | **Speed** | Fast (milliseconds per request) | Slow (seconds per page) |
 | **Reliability** | High (structured data) | Medium (DOM can change) |
 | **Setup effort** | Low–Medium | Medium |
-| **Works on dynamic sites** | Sometimes | Always |
-| **Detectable?** | Harder to detect | Easier to detect |
+| **Works on dynamic sites** | Sometimes | [60% of the time it works all the time](https://www.youtube.com/shorts/UDSH94tdGVU) |
 | **Best for** | Search results, large datasets | Forms, login-gated, dynamic pages |
 
 **Rule of thumb**: Always look for an API first. Only use browser automation when you have to.
 
+## Exercises {#exercises-p4}
+
+**Exercise 1 (easy) — Extract the intro paragraph from a Wikipedia page**
+
+Use `selenider` to navigate to the Wikipedia page for the Hertie School and extract the text of the first paragraph of the article body. This is a simple navigation + extraction task with no dynamic content — but it shows the basic `open_url` → `get_page_source()` → `rvest` workflow.
+
+::: {.callout-note collapse="true"}
+## Solution
+
+```r
+session <- selenider_session("chromote",
+  options = chromote_options(headless = FALSE, width = 1280, height = 900))
+
+open_url("https://en.wikipedia.org/wiki/Hertie_School")
+Sys.sleep(2)
+
+html <- get_page_source()
+
+paras <- html |>
+  html_elements(".mw-parser-output > p") |>
+  html_text(trim = TRUE)
+
+paras[nzchar(paras)][1]
+# "The Hertie School is a private research university in Berlin, Germany..."
+
+close_session(session)
+```
+
+Note: for static pages like Wikipedia, this is illustrative only — `read_html("https://en.wikipedia.org/wiki/Hertie_School")` would give you the exact same result without needing a browser. Browser automation adds value only when content is injected by JavaScript after load.
+:::
+
 ---
 
-## ✋ Your turn
+**Exercise 2 (intermediate) — Compare YouTube results for two queries**
+
+Use `collect_search_results()` to collect the top results for two related queries — for example, "nuclear energy" and "Atomkraft". Which channels appear in both result sets? Are there channels that appear only in one language's results?
+
+::: {.callout-note collapse="true"}
+## Solution
+
+```r
+results <- map_dfr(
+  c("nuclear energy", "Atomkraft"),
+  \(q) { Sys.sleep(2); collect_search_results(q, n_scrolls = 2) }
+)
+
+# Channels in both
+shared <- results |>
+  group_by(channel) |>
+  summarise(queries = n_distinct(query), .groups = "drop") |>
+  filter(queries == 2)
+
+shared
+# Likely: DW, Euronews, major science channels appear in both
+# language-specific channels (ARD, ZDF, BR) appear only in "Atomkraft"
+# English-only YouTubers appear only in "nuclear energy"
+
+# Rank of shared channels per query
+results |>
+  filter(channel %in% shared$channel) |>
+  select(query, rank, channel) |>
+  arrange(query, rank)
+```
+
+The comparison reveals language-segmented information ecosystems: some channels (e.g. DW, which publishes in both German and English) bridge both, while most channels are only surfaced for one language query. This is the basic methodology behind DSA-style algorithmic audits — systematic comparison of what a platform recommends for equivalent queries across different languages or regions.
+:::
+
+---
+
+## ✋ Your turn {#your-turn-p4}
 
 **Option A — YouTube search audit (recommended):**  
-Choose a policy topic you care about — migration, nuclear energy, vaccine hesitancy, a recent national election. Pick 2–3 search queries for the same topic (e.g., the same term in English, German, and French). Use the `collect_search_results()` function to gather the top \~40 results for each query. Which channels appear consistently across languages? Are the same videos surfaced? Write 2–3 sentences describing what this might reveal about YouTube's recommendation logic.
+Choose a policy topic you care about — migration, nuclear energy, vaccine hesitancy, a recent national election. Pick 2–3 search queries for the same topic (e.g., the same term in English, German, and French). Use the `collect_search_results()` function to gather the top ~40 results for each query. Which channels appear consistently across languages? Are the same videos surfaced? Write 2–3 sentences describing what this might reveal about YouTube's recommendation logic.
 
 **Option B — German Federal Gazette (Bundesanzeiger):**  
 [bundesanzeiger.de](https://www.bundesanzeiger.de) publishes mandatory corporate filings through a JavaScript-rendered interface. Use `selenider` to fill the search form, wait for results to appear, and collect company names, filing types, and publication dates. (Note: the site uses a CAPTCHA on some search paths — try company name search first.)
@@ -813,6 +1020,12 @@ search_results <-
 
 # Step 2: For the top results, use browser automation to retrieve
 # full infobox data from each article page.
+# Note: Wikipedia article pages are *static* HTML — browser automation is not
+# needed here and is used only to illustrate the combined workflow. In practice,
+# the better approach is to download the HTML directly with httr2 or read_html()
+# and parse with rvest. See the "Scraping multiple pages" example in the web
+# scraping lab:
+# https://raw.githack.com/intro-to-data-science-25/labs/main/session-05-web-scraping/5-web-scraping.html
 
 session <- selenider_session("chromote", options = chromote_options(headless = TRUE, width = 1280, height = 900))
 
@@ -822,7 +1035,6 @@ get_infobox <- function(article_key) {
 
   html <- get_page_source()
 
-  # Extract infobox rows: label → value pairs
   labels <- html |>
     html_elements(".infobox th") |>
     html_text(trim = TRUE)
@@ -840,7 +1052,6 @@ get_infobox <- function(article_key) {
   )
 }
 
-# Collect infoboxes for the top 10 results
 infoboxes <- map(
   head(search_results$key, 10),
   \(key) {
@@ -855,7 +1066,6 @@ infoboxes <- map(
 close_session(session)
 
 # Step 3: Analyse — what do the infoboxes tell us?
-# E.g. which institutions list an endowment? What are their founding years?
 infoboxes |>
   filter(str_detect(label, regex("established|founded|endow", ignore_case = TRUE))) |>
   pivot_wider(names_from = label, values_from = value) |>
