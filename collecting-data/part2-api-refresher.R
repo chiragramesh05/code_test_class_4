@@ -22,7 +22,7 @@ toJSON(list(name = "Anna", country = "DE"), auto_unbox = TRUE)
 # -----------------------------------------------------------------------------
 
 resp <- request("https://api.genderize.io") |>
-  req_url_query(name = "Anna") |>
+  req_url_query(name = "Chirag") |>
   req_perform()
 
 resp |>
@@ -63,7 +63,7 @@ genderize <- function(names) {
 }
 
 # Try it
-genderize(c("James", "Sophie", "Amara")) |>
+genderize(c("Chirag", "Arun", "James", "Sophie", "Amara")) |>
   select(name, gender, probability, count)
 
 # -----------------------------------------------------------------------------
